@@ -81,6 +81,11 @@ safe_extension() {
     echo "${ext,,}"  # Return lowercase extension
 }
 
+is_processed_file() {
+    local filename="$1"
+    [[ "$filename" == *"$SUFFIX".* ]]
+}
+
 # --- Main ---
 check_imagemagick
 
@@ -137,6 +142,12 @@ fi
 for infile in "${input_files[@]}"; do
     # Skip directories
     [[ ! -f "$infile" ]] && continue
+    
+    # Skip already processed files (FIXED: prevent reprocessing output files)
+    if is_processed_file "$infile"; then
+        echo "Skipping already processed file: $infile"
+        continue
+    fi
     
     # Skip unsupported formats
     ext=$(safe_extension "$infile")
