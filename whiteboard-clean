@@ -13,6 +13,7 @@ OVERWRITE_EXISTING=0    # 0=skip existing outputs, 1=overwrite
 RECURSIVE_MODE=0        # 0=current dir only, 1=recursive search
 OUTPUT_DIR=""           # Custom output directory (empty=same as input)
 PROCESSED_COUNT=0       # Track successful operations
+CONVERT_CMD="convert"   # Default ImageMagick command
 
 # --- Functions ---
 show_help() {
@@ -43,8 +44,13 @@ EOF
 }
 
 check_imagemagick() {
-    if ! command -v convert &>/dev/null; then
-        echo "Error: ImageMagick ('convert') not found"
+    # Check for ImageMagick 7's magick first, then convert
+    if command -v magick &>/dev/null; then
+        CONVERT_CMD="magick"
+    elif command -v convert &>/dev/null; then
+        CONVERT_CMD="convert"
+    else
+        echo "Error: ImageMagick not found"
         echo "Install with:"
         echo "  macOS: brew install imagemagick"
         echo "  Linux: sudo apt-get install imagemagick"
@@ -57,21 +63,23 @@ process_image() {
     local infile="$1"
     local outfile="$2"
     
-    convert "$infile" \
-        -morphology Convolve DoG:15,100,0 \
-        -negate \
-        -normalize \
-        -blur 0x1 \
-        -channel RGB -level 60%,91%,0.1 \
-        "$outfile"
-}
-
-generate_patterns() {
-    local patterns=()
-    for ext in "${SUPPORTED_EXTS[@]}"; do
-        patterns+=("-iname" "*.$ext")
-    done
-    echo "${patterns[@]}"
+    if [[ "$CONVERT_CMD" == "magick" ]]; then
+        magick "$infile" \
+            -morphology Convolve DoG:15,100,0 \
+            -negate \
+            -normalize \
+            -blur 0x1 \
+            -channel RGB -level 60%,91%,0.1 \
+            "$outfile"
+    else
+        convert "$infile" \
+            -morphology Convolve DoG:15,100,0 \
+            -negate \
+            -normalize \
+            -blur 0x1 \
+            -channel RGB -level 60%,91%,0.1 \
+            "$outfile"
+    fi
 }
 
 safe_extension() {
@@ -114,16 +122,21 @@ if [[ $# -gt 0 ]]; then
     input_files=("$@")
 else
     # Build OR conditions for extensions
-    pattern_args=("(")
+    pattern_args=()
     for ext in "${SUPPORTED_EXTS[@]}"; do
-        pattern_args+=("-iname" "*.$ext" "-o")
+        pattern_args+=("-o" "-iname" "*.$ext")
     done
-    # Remove last "-o" and close parenthesis
-    unset 'pattern_args[${#pattern_args[@]}-1]'
-    pattern_args+=(")")
+
+    # Remove the first "-o" since find doesn't need it at start
+    pattern_args=("${pattern_args[@]:1}")
     
     find_args=("." "-type" "f")
     [[ $RECURSIVE_MODE -eq 0 ]] && find_args+=("-maxdepth" "1")
+    
+    # Add parentheses if we have patterns
+    if [[ ${#pattern_args[@]} -gt 0 ]]; then
+        pattern_args=("(" "${pattern_args[@]}" ")")
+    fi
     
     mapfile -t input_files < <(find "${find_args[@]}" "${pattern_args[@]}" 2>/dev/null | sort)
 fi
@@ -139,7 +152,7 @@ for infile in "${input_files[@]}"; do
     # Skip directories
     [[ ! -f "$infile" ]] && continue
     
-    # Skip already processed files (FIXED: prevent reprocessing output files)
+    # Skip already processed files
     if is_processed_file "$infile"; then
         echo "Skipping already processed file: $infile"
         continue
@@ -184,4 +197,4 @@ if [[ $PROCESSED_COUNT -eq 0 ]]; then
 else
     echo "Done. Processed $PROCESSED_COUNT file(s)."
 fi
-exit 0
+exit 
