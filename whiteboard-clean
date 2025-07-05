@@ -1,0 +1,158 @@
+#!/bin/bash
+
+# whiteboard-clean
+# Enhanced whiteboard photo cleaner using ImageMagick
+
+set -euo pipefail
+IFS=$'\n\t'
+
+# Configuration
+SUFFIX="_cleaned"       # Output file suffix
+declare -a SUPPORTED_EXTS=("jpg" "jpeg" "png" "bmp" "tiff" "tif")  # Case-insensitive extensions
+OVERWRITE_EXISTING=0    # 0=skip existing outputs, 1=overwrite
+RECURSIVE_MODE=0        # 0=current dir only, 1=recursive search
+OUTPUT_DIR=""           # Custom output directory (empty=same as input)
+PROCESSED_COUNT=0       # Track successful operations
+
+# --- Functions ---
+show_help() {
+    cat <<EOF
+whiteboard-clean v1.0
+Clean whiteboard photos using ImageMagick
+
+Usage: ${0##*/} [OPTIONS] [FILES...]
+
+Options:
+  -h            Show this help
+  -r            Process directories recursively
+  -o            Overwrite existing output files
+  -d DIR        Output directory for processed files
+  -s SUFFIX     Output suffix (default: _cleaned)
+  --            Handle files starting with '-'
+
+Examples:
+  Process all images in current directory:
+    whiteboard-clean
+  
+  Process specific files recursively:
+    whiteboard-clean -r -o ~/whiteboards/*.jpg
+  
+  Use custom output directory:
+    whiteboard-clean -d ./cleaned -r
+EOF
+}
+
+check_imagemagick() {
+    if ! command -v convert &>/dev/null; then
+        echo "Error: ImageMagick ('convert') not found"
+        echo "Install with:"
+        echo "  macOS: brew install imagemagick"
+        echo "  Linux: sudo apt-get install imagemagick"
+        echo "  Windows: https://imagemagick.org/script/download.php"
+        exit 1
+    fi
+}
+
+process_image() {
+    local infile="$1"
+    local outfile="$2"
+    
+    convert "$infile" \
+        -morphology Convolve DoG:15,100,0 \
+        -negate \
+        -normalize \
+        -blur 0x1 \
+        -channel RGB -level 60%,91%,0.1 \
+        "$outfile"
+}
+
+generate_patterns() {
+    local patterns=()
+    for ext in "${SUPPORTED_EXTS[@]}"; do
+        patterns+=("-iname" "*.$ext")
+    done
+    echo "${patterns[@]}"
+}
+
+safe_extension() {
+    local file="$1"
+    local base="${file%.*}"
+    local ext="${file##*.}"
+    echo "${ext,,}"  # Return lowercase extension
+}
+
+# --- Main ---
+check_imagemagick
+
+# Parse command-line options
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h) show_help; exit 0 ;;
+        -r) RECURSIVE_MODE=1 ;;
+        -o) OVERWRITE_EXISTING=1 ;;
+        -d) OUTPUT_DIR="${2%/}"; shift ;;
+        -s) SUFFIX="$2"; shift ;;
+        --) shift; break ;;  # Stop processing options
+        -*) echo "Invalid option: $1" >&2; show_help; exit 1 ;;
+        *) break ;;  # Start of file arguments
+    esac
+    shift
+done
+
+# Handle output directory creation
+if [[ -n "$OUTPUT_DIR" ]]; then
+    mkdir -p "$OUTPUT_DIR" || exit 1
+fi
+
+# Find or process files
+if [[ $# -gt 0 ]]; then
+    input_files=("$@")
+else
+    patterns=($(generate_patterns))
+    find_args=("." "-type" "f")
+    [[ $RECURSIVE_MODE -eq 0 ]] && find_args+=("-maxdepth" "1")
+    find_args+=("(" "${patterns[@]}" ")")
+    mapfile -t input_files < <(find "${find_args[@]}" 2>/dev/null | sort)
+fi
+
+# Process files
+for infile in "${input_files[@]}"; do
+    # Skip directories
+    [[ ! -f "$infile" ]] && continue
+    
+    # Skip unsupported formats
+    ext=$(safe_extension "$infile")
+    if ! printf '%s\n' "${SUPPORTED_EXTS[@]}" | grep -iq "^$ext$"; then
+        echo "Skipping unsupported format: $infile"
+        continue
+    fi
+    
+    # Generate output path
+    filename="${infile##*/}"
+    base="${filename%.*}"
+    if [[ -n "$OUTPUT_DIR" ]]; then
+        outfile="$OUTPUT_DIR/${base}${SUFFIX}.${ext}"
+    else
+        outfile="${infile%.*}$SUFFIX.${ext}"
+    fi
+    
+    # Skip processing checks
+    if [[ $OVERWRITE_EXISTING -eq 0 && -f "$outfile" ]]; then
+        echo "Skipping (output exists): $infile"
+        continue
+    fi
+    
+    # Process image
+    echo "Processing: $infile -> $outfile"
+    if process_image "$infile" "$outfile"; then
+        ((PROCESSED_COUNT++))
+    else
+        echo "Error processing: $infile" >&2
+        # Remove failed output
+        [[ -f "$outfile" ]] && rm -f "$outfile"
+    fi
+done
+
+# Summary
+echo "Done. Processed $PROCESSED_COUNT file(s)."
+exit 0
