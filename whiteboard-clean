@@ -175,6 +175,6 @@ done
 if [[ $PROCESSED_COUNT -eq 0 ]]; then
     echo "No files processed."
 else
-echo "Done. Processed $PROCESSED_COUNT file(s)."
+    echo "Done. Processed $PROCESSED_COUNT file(s)."
 fi
 exit 0
