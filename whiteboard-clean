@@ -121,7 +121,16 @@ else
     unset 'pattern_args[${#pattern_args[@]}-1]'
     pattern_args+=(")")
     
+    find_args=("." "-type" "f")
+    [[ $RECURSIVE_MODE -eq 0 ]] && find_args+=("-maxdepth" "1")
+    
     mapfile -t input_files < <(find "${find_args[@]}" "${pattern_args[@]}" 2>/dev/null | sort)
+fi
+
+# Show recursive hint if applicable
+if [[ $# -eq 0 && $RECURSIVE_MODE -eq 0 && ${#input_files[@]} -gt 0 ]]; then
+    echo "Note: Processing current directory only. Use '-r' to include subdirectories."
+    echo
 fi
 
 # Process files
@@ -163,5 +172,9 @@ for infile in "${input_files[@]}"; do
 done
 
 # Summary
+if [[ $PROCESSED_COUNT -eq 0 ]]; then
+    echo "No files processed."
+else
 echo "Done. Processed $PROCESSED_COUNT file(s)."
+fi
 exit 0
