@@ -18,7 +18,7 @@ Note - this does not handle image cropping and perspective or keystone correctio
 
 | Original | Cleaned |
 |----------|---------|
-| ![Original whiteboard with shadows and color cast](docs/before.jpg) | ![Clean whiteboard with pure white background](docs/after.jpg) |
+| ![Original whiteboard with shadows and color cast](docs/before.png) | ![Clean whiteboard with pure white background](docs/after.png) |
 
 *Note: Add your own before/after images to the `docs/` folder*
 
