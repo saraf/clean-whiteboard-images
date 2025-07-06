@@ -1,200 +1,374 @@
-#!/bin/bash
+#!/usr/bin/env python3
+"""
+Whiteboard Image Cleaner Script
+Description: Cleans whiteboard images using ImageMagick with enhanced processing
+"""
 
-# whiteboard-clean
-# Enhanced whiteboard photo cleaner using ImageMagick
+import os
+import sys
+import argparse
+import subprocess
+import shutil
+from pathlib import Path
+from typing import List, Tuple, Optional
+import logging
+from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
-set -euo pipefail
-IFS=$'\n\t'
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
-# Configuration
-SUFFIX="_cleaned"       # Output file suffix
-declare -a SUPPORTED_EXTS=("jpg" "jpeg" "png" "bmp" "tiff" "tif")  # Case-insensitive extensions
-OVERWRITE_EXISTING=0    # 0=skip existing outputs, 1=overwrite
-RECURSIVE_MODE=0        # 0=current dir only, 1=recursive search
-OUTPUT_DIR=""           # Custom output directory (empty=same as input)
-PROCESSED_COUNT=0       # Track successful operations
-CONVERT_CMD="convert"   # Default ImageMagick command
+@dataclass
+class ProcessingStats:
+    """Statistics for tracking processing results"""
+    processed: int = 0
+    skipped: int = 0
+    errors: int = 0
+    lock: threading.Lock = threading.Lock()
+    
+    def increment_processed(self):
+        with self.lock:
+            self.processed += 1
+    
+    def increment_skipped(self):
+        with self.lock:
+            self.skipped += 1
+    
+    def increment_errors(self):
+        with self.lock:
+            self.errors += 1
 
-# --- Functions ---
-show_help() {
-    cat <<EOF
-whiteboard-clean v1.0
-Clean whiteboard photos using ImageMagick
+class WhiteboardCleaner:
+    """Main class for cleaning whiteboard images"""
+    
+    SUPPORTED_FORMATS = {'.jpg', '.jpeg', '.png', '.tiff', '.tif', '.bmp', '.gif'}
+    
+    def __init__(self, output_dir: Optional[str] = None, suffix: str = "_cleaned", 
+                 recursive: bool = False, force_overwrite: bool = False, 
+                 verbose: bool = False, max_workers: int = 4, force_grayscale: bool = False):
+        self.output_dir = output_dir
+        self.suffix = suffix
+        self.recursive = recursive
+        self.force_overwrite = force_overwrite
+        self.verbose = verbose
+        self.max_workers = max_workers
+        self.force_grayscale = force_grayscale
+        self.stats = ProcessingStats()
+        
+        # Set logging level based on verbose flag
+        if verbose:
+            logging.getLogger().setLevel(logging.DEBUG)
+        
+        # Check if ImageMagick is available
+        self.magick_cmd = self._check_imagemagick()
+    
+    def _check_imagemagick(self) -> str:
+        """Check if ImageMagick is installed and return the command to use"""
+        # Try 'magick' command first (ImageMagick 7+)
+        if shutil.which('magick'):
+            return 'magick'
+        # Fall back to 'convert' (ImageMagick 6)
+        elif shutil.which('convert'):
+            return 'convert'
+        else:
+            logger.error("ImageMagick not found. Please install ImageMagick.")
+            sys.exit(1)
+    
+    def _is_supported_image(self, file_path: Path) -> bool:
+        """Check if file is a supported image format"""
+        return file_path.suffix.lower() in self.SUPPORTED_FORMATS
+    
+    def _generate_output_filename(self, input_file: Path) -> Path:
+        """Generate output filename based on input file and settings"""
+        if self.output_dir:
+            output_dir = Path(self.output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            output_dir = input_file.parent
+        
+        filename = input_file.stem + self.suffix + input_file.suffix
+        return output_dir / filename
+    
+    def _clean_whiteboard_image(self, input_file: Path, output_file: Path) -> bool:
+        """Clean a single whiteboard image using ImageMagick"""
+        logger.debug(f"Processing: {input_file}")
+        
+        # Create output directory if it doesn't exist
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Build ImageMagick command based on color preference
+        magick_command = [self.magick_cmd, str(input_file)]
+        
+        if self.force_grayscale:
+            # Grayscale processing (original approach)
+            magick_command.extend([
+                # Convert to grayscale for better processing
+                '-colorspace', 'Gray',
+                # Enhance contrast and remove shadows
+                '-morphology', 'Convolve', 'DoG:15,100,0',
+                '-negate',
+                '-normalize',
+                # Reduce noise
+                '-blur', '0x1',
+                # Improve text clarity
+                '-level', '60%,91%,0.1',
+                # Final sharpening
+                '-unsharp', '0x1',
+            ])
+        else:
+            # Color-preserving processing
+            magick_command.extend([
+                # Enhance contrast while preserving colors
+                '-modulate', '100,150,100',
+                # Remove shadows using white point adjustment
+                '-white-point', '0.95',
+                # Enhance each color channel
+                '-channel', 'RGB',
+                '-normalize',
+                # Reduce noise while preserving edges
+                '-blur', '0x0.5',
+                # Improve contrast
+                '-sigmoidal-contrast', '3,50%',
+                # Sharpen text
+                '-unsharp', '0x1+1.0+0.05',
+                # Clean up the background
+                '-level', '5%,95%,0.9',
+            ])
+        
+        # Common final steps
+        magick_command.extend([
+            # For PNG files, ensure proper alpha channel handling
+            '-background', 'white',
+            '-flatten',
+            str(output_file)
+        ])
+        
+        try:
+            result = subprocess.run(
+                magick_command,
+                capture_output=True,
+                text=True,
+                timeout=300  # 5 minute timeout
+            )
+            
+            if result.returncode == 0:
+                mode = "grayscale" if self.force_grayscale else "color"
+                logger.info(f"✓ Cleaned ({mode}): {input_file.name}")
+                self.stats.increment_processed()
+                return True
+            else:
+                logger.error(f"✗ Failed to process {input_file}: {result.stderr}")
+                self.stats.increment_errors()
+                return False
+                
+        except subprocess.TimeoutExpired:
+            logger.error(f"✗ Timeout processing {input_file}")
+            self.stats.increment_errors()
+            return False
+        except Exception as e:
+            logger.error(f"✗ Error processing {input_file}: {str(e)}")
+            self.stats.increment_errors()
+            return False
+    
+    def _process_single_file(self, input_file: Path) -> bool:
+        """Process a single image file"""
+        if not input_file.is_file():
+            logger.warning(f"File not found: {input_file}")
+            return False
+        
+        if not self._is_supported_image(input_file):
+            logger.warning(f"Unsupported file format: {input_file}")
+            return False
+        
+        output_file = self._generate_output_filename(input_file)
+        
+        # Check if output file already exists
+        if output_file.exists() and not self.force_overwrite:
+            logger.warning(f"Output file exists (use --force to overwrite): {output_file}")
+            self.stats.increment_skipped()
+            return False
+        
+        return self._clean_whiteboard_image(input_file, output_file)
+    
+    def _get_image_files(self, input_path: Path) -> List[Path]:
+        """Get list of image files to process"""
+        image_files = []
+        
+        if input_path.is_file():
+            if self._is_supported_image(input_path):
+                image_files.append(input_path)
+        elif input_path.is_dir():
+            if self.recursive:
+                pattern = "**/*"
+            else:
+                pattern = "*"
+            
+            for file_path in input_path.glob(pattern):
+                if file_path.is_file() and self._is_supported_image(file_path):
+                    image_files.append(file_path)
+        
+        return sorted(image_files)
+    
+    def process(self, input_path: str) -> ProcessingStats:
+        """Process input path (file or directory)"""
+        input_path = Path(input_path)
+        
+        if not input_path.exists():
+            logger.error(f"Input path not found: {input_path}")
+            sys.exit(1)
+        
+        logger.info(f"Starting whiteboard cleaning...")
+        logger.info(f"Input: {input_path}")
+        logger.info(f"Output directory: {self.output_dir or 'same as input'}")
+        logger.info(f"Suffix: {self.suffix}")
+        logger.info(f"Recursive: {self.recursive}")
+        logger.info(f"Force overwrite: {self.force_overwrite}")
+        logger.info(f"Color mode: {'grayscale' if self.force_grayscale else 'color-preserving'}")
+        logger.info(f"Max workers: {self.max_workers}")
+        
+        # Get all image files to process
+        image_files = self._get_image_files(input_path)
+        
+        if not image_files:
+            logger.warning("No supported image files found")
+            return self.stats
+        
+        logger.info(f"Found {len(image_files)} image files to process")
+        
+        # Process files using thread pool for better performance
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            # Submit all tasks
+            futures = {executor.submit(self._process_single_file, file_path): file_path 
+                      for file_path in image_files}
+            
+            # Process completed tasks
+            for future in as_completed(futures):
+                file_path = futures[future]
+                try:
+                    future.result()
+                except Exception as e:
+                    logger.error(f"Unexpected error processing {file_path}: {str(e)}")
+                    self.stats.increment_errors()
+        
+        return self.stats
+    
+    def print_summary(self):
+        """Print processing summary"""
+        print("\n" + "="*50)
+        print("Processing Summary")
+        print("="*50)
+        print(f"Files processed: {self.stats.processed}")
+        print(f"Files skipped: {self.stats.skipped}")
+        print(f"Errors: {self.stats.errors}")
+        print(f"Total files: {self.stats.processed + self.stats.skipped + self.stats.errors}")
+        print("="*50)
 
-Usage: ${0##*/} [OPTIONS] [FILES...]
 
-Options:
-  -h            Show this help
-  -r            Process directories recursively
-  -o            Overwrite existing output files
-  -d DIR        Output directory for processed files
-  -s SUFFIX     Output suffix (default: _cleaned)
-  --            Handle files starting with '-'
-
+def main():
+    """Main function"""
+    parser = argparse.ArgumentParser(
+        description="Clean whiteboard images by removing shadows, improving contrast, and reducing noise. Preserves colored markers (red, green, blue) unless forced to grayscale. If no input path is provided, processes all images in the current directory.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
 Examples:
-  Process all images in current directory:
-    whiteboard-clean
-  
-  Process specific files recursively:
-    whiteboard-clean -r -o ~/whiteboards/*.jpg
-  
-  Use custom output directory:
-    whiteboard-clean -d ./cleaned -r
-EOF
-}
+  %(prog)s                                     # Process current directory
+  %(prog)s -r                                  # Process current directory recursively
+  %(prog)s image.jpg                           # Clean single image (preserve colors)
+  %(prog)s -g image.jpg                        # Clean single image (grayscale)
+  %(prog)s -r ./photos                         # Clean all images in directory
+  %(prog)s -o ./clean -s _enhanced image.png   # Custom output and suffix
+  %(prog)s -r -f -g ./whiteboards              # Force overwrite, recursive, grayscale
+  %(prog)s -j 8 -r ./large_folder              # Use 8 threads for processing
 
-check_imagemagick() {
-    # Check for ImageMagick 7's magick first, then convert
-    if command -v magick &>/dev/null; then
-        CONVERT_CMD="magick"
-    elif command -v convert &>/dev/null; then
-        CONVERT_CMD="convert"
-    else
-        echo "Error: ImageMagick not found"
-        echo "Install with:"
-        echo "  macOS: brew install imagemagick"
-        echo "  Linux: sudo apt-get install imagemagick"
-        echo "  Windows: https://imagemagick.org/script/download.php"
-        exit 1
-    fi
-}
-
-process_image() {
-    local infile="$1"
-    local outfile="$2"
+Supported formats: JPG, JPEG, PNG, TIFF, BMP, GIF
+        """
+    )
     
-    if [[ "$CONVERT_CMD" == "magick" ]]; then
-        magick "$infile" \
-            -morphology Convolve DoG:15,100,0 \
-            -negate \
-            -normalize \
-            -blur 0x1 \
-            -channel RGB -level 60%,91%,0.1 \
-            "$outfile"
-    else
-        convert "$infile" \
-            -morphology Convolve DoG:15,100,0 \
-            -negate \
-            -normalize \
-            -blur 0x1 \
-            -channel RGB -level 60%,91%,0.1 \
-            "$outfile"
-    fi
-}
-
-safe_extension() {
-    local file="$1"
-    local base="${file%.*}"
-    local ext="${file##*.}"
-    echo "${ext,,}"  # Return lowercase extension
-}
-
-is_processed_file() {
-    local filename="$1"
-    [[ "$filename" == *"$SUFFIX".* ]]
-}
-
-# --- Main ---
-check_imagemagick
-
-# Parse command-line options
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        -h) show_help; exit 0 ;;
-        -r) RECURSIVE_MODE=1 ;;
-        -o) OVERWRITE_EXISTING=1 ;;
-        -d) OUTPUT_DIR="${2%/}"; shift ;;
-        -s) SUFFIX="$2"; shift ;;
-        --) shift; break ;;  # Stop processing options
-        -*) echo "Invalid option: $1" >&2; show_help; exit 1 ;;
-        *) break ;;  # Start of file arguments
-    esac
-    shift
-done
-
-# Handle output directory creation
-if [[ -n "$OUTPUT_DIR" ]]; then
-    mkdir -p "$OUTPUT_DIR" || exit 1
-fi
-
-# Find or process files
-if [[ $# -gt 0 ]]; then
-    input_files=("$@")
-else
-    # Build OR conditions for extensions
-    pattern_args=()
-    for ext in "${SUPPORTED_EXTS[@]}"; do
-        pattern_args+=("-o" "-iname" "*.$ext")
-    done
-
-    # Remove the first "-o" since find doesn't need it at start
-    pattern_args=("${pattern_args[@]:1}")
+    parser.add_argument(
+        'input_path',
+        nargs='?',
+        default='.',
+        help='Input file or directory path (default: current directory)'
+    )
     
-    find_args=("." "-type" "f")
-    [[ $RECURSIVE_MODE -eq 0 ]] && find_args+=("-maxdepth" "1")
+    parser.add_argument(
+        '-o', '--output',
+        help='Output directory (default: same as input)'
+    )
     
-    # Add parentheses if we have patterns
-    if [[ ${#pattern_args[@]} -gt 0 ]]; then
-        pattern_args=("(" "${pattern_args[@]}" ")")
-    fi
+    parser.add_argument(
+        '-s', '--suffix',
+        default='_cleaned',
+        help='Filename suffix (default: _cleaned)'
+    )
     
-    mapfile -t input_files < <(find "${find_args[@]}" "${pattern_args[@]}" 2>/dev/null | sort)
-fi
+    parser.add_argument(
+        '-r', '--recursive',
+        action='store_true',
+        help='Process directories recursively'
+    )
+    
+    parser.add_argument(
+        '-f', '--force',
+        action='store_true',
+        help='Overwrite existing files'
+    )
+    
+    parser.add_argument(
+        '-v', '--verbose',
+        action='store_true',
+        help='Enable verbose output'
+    )
+    
+    parser.add_argument(
+        '-j', '--jobs',
+        type=int,
+        default=4,
+        help='Number of parallel jobs (default: 4)'
+    )
+    
+    parser.add_argument(
+        '-g', '--grayscale',
+        action='store_true',
+        help='Force conversion to grayscale'
+    )
+    
+    args = parser.parse_args()
+    
+    # Create cleaner instance
+    cleaner = WhiteboardCleaner(
+        output_dir=args.output,
+        suffix=args.suffix,
+        recursive=args.recursive,
+        force_overwrite=args.force,
+        verbose=args.verbose,
+        max_workers=args.jobs,
+        force_grayscale=args.grayscale
+    )
+    
+    try:
+        # Process images
+        stats = cleaner.process(args.input_path)
+        
+        # Print summary
+        cleaner.print_summary()
+        
+        # Exit with error code if there were errors
+        if stats.errors > 0:
+            sys.exit(1)
+            
+    except KeyboardInterrupt:
+        logger.info("\nProcessing interrupted by user")
+        sys.exit(1)
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}")
+        sys.exit(1)
 
-# Show recursive hint if applicable
-if [[ $# -eq 0 && $RECURSIVE_MODE -eq 0 && ${#input_files[@]} -gt 0 ]]; then
-    echo "Note: Processing current directory only. Use '-r' to include subdirectories."
-    echo
-fi
 
-# Process files
-for infile in "${input_files[@]}"; do
-    # Skip directories
-    [[ ! -f "$infile" ]] && continue
-    
-    # Skip already processed files
-    if is_processed_file "$infile"; then
-        echo "Skipping already processed file: $infile"
-        continue
-    fi
-    
-    # Skip unsupported formats
-    ext=$(safe_extension "$infile")
-    if ! printf '%s\n' "${SUPPORTED_EXTS[@]}" | grep -iq "^$ext$"; then
-        echo "Skipping unsupported format: $infile"
-        continue
-    fi
-    
-    # Generate output path
-    filename="${infile##*/}"
-    base="${filename%.*}"
-    if [[ -n "$OUTPUT_DIR" ]]; then
-        outfile="$OUTPUT_DIR/${base}${SUFFIX}.${ext}"
-    else
-        outfile="${infile%.*}$SUFFIX.${ext}"
-    fi
-    
-    # Skip processing checks
-    if [[ $OVERWRITE_EXISTING -eq 0 && -f "$outfile" ]]; then
-        echo "Skipping (output exists): $infile"
-        continue
-    fi
-    
-    # Process image
-    echo "Processing: $infile -> $outfile"
-    if process_image "$infile" "$outfile"; then
-        ((PROCESSED_COUNT++))
-    else
-        echo "Error processing: $infile" >&2
-        # Remove failed output
-        [[ -f "$outfile" ]] && rm -f "$outfile"
-    fi
-done
-
-# Summary
-if [[ $PROCESSED_COUNT -eq 0 ]]; then
-    echo "No files processed."
-else
-    echo "Done. Processed $PROCESSED_COUNT file(s)."
-fi
-exit 
+if __name__ == "__main__":
+    main()
