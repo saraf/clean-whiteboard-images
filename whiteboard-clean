@@ -201,6 +201,11 @@ class WhiteboardCleaner:
         
         if input_path.is_file():
             if self._is_supported_image(input_path):
+                if self.suffix and self._has_cleaning_suffix(input_path):
+                    self.stats.increment_skipped()
+                    if self.verbose:
+                        logger.debug(f"Skipping already cleaned file: {input_path}") 
+                logger.debug(f"Adding file to image list: {input_path}") 
                 image_files.append(input_path)
         elif input_path.is_dir():
             if self.recursive:
@@ -209,8 +214,15 @@ class WhiteboardCleaner:
                 pattern = "*"
             
             for file_path in input_path.glob(pattern):
-                if file_path.is_file() and self._is_supported_image(file_path):
-                    image_files.append(file_path)
+                logger.debug(f"Processing file_path: {file_path}")
+                if ( file_path.is_file() and self._is_supported_image(file_path)):
+                    if (self._has_cleaning_suffix(file_path)):
+                        self.stats.increment_skipped()
+                        if self.verbose:
+                            logger.debug(f"Skipping already cleaned file: {file_path}") 
+                    else:
+                        logger.debug(f"Adding file to image list: {file_path}") 
+                        image_files.append(file_path)
         
         return sorted(image_files)
     
@@ -267,12 +279,16 @@ class WhiteboardCleaner:
         print(f"Errors: {self.stats.errors}")
         print(f"Total files: {self.stats.processed + self.stats.skipped + self.stats.errors}")
         print("="*50)
+    
+    def _has_cleaning_suffix(self, file_path: Path) -> bool:
+        return file_path.stem.endswith(self.suffix)
+
 
 
 def main():
     """Main function"""
     parser = argparse.ArgumentParser(
-        description="Clean whiteboard images by removing shadows, improving contrast, and reducing noise. Preserves colored markers (red, green, blue) unless forced to grayscale. If no input path is provided, processes all images in the current directory.",
+        description="Clean whiteboard images by removing shadows, improving contrast, and reducing noise. Preserves colored markers (red, green, blue) unless forced to grayscale. Files ending with the specified suffix are skipped. If no input path is provided, processes all images in the current directory.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -304,7 +320,7 @@ Supported formats: JPG, JPEG, PNG, TIFF, BMP, GIF
     parser.add_argument(
         '-s', '--suffix',
         default='_cleaned',
-        help='Filename suffix (default: _cleaned)'
+        help='Filename suffix for cleaned images (default: \'_cleaned\'). Files with names ending with this suffix are skipped.'
     )
     
     parser.add_argument(
